@@ -46,20 +46,6 @@ log.addHandler(logging.FileHandler(os.path.join(RECORDINGS_DIR, 'logs', LOG_FILE
 # Explicitly tell the underlying HTTP transport library not to retry, since we are handling retry logic ourselves.
 httplib2.RETRIES = 1
 
-# Maximum number of times to retry before giving up.
-MAX_RETRIES = 10
-
-# Always retry when these exceptions are raised.
-RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError, http.client.NotConnected,
-    http.client.IncompleteRead, http.client.ImproperConnectionState,
-    http.client.CannotSendRequest, http.client.CannotSendHeader,
-    http.client.ResponseNotReady, http.client.BadStatusLine)
-
-# Always retry when an apiclient.errors.HttpError with one of these status codes is raised.
-RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-
-VALID_PRIVACY_STATUSES = ('public', 'private', 'unlisted')
-
 
 def send_plaintext_email(subject: str, body: str, to: Collection[str], sender: str, password: str) -> None:
     msg = EmailMessage()
@@ -182,6 +168,18 @@ def initialize_upload(youtube, options):
 
 # This method implements an exponential backoff strategy to resume a failed upload.
 def resumable_upload(insert_request):
+    # Maximum number of times to retry before giving up.
+    MAX_RETRIES = 10
+
+    # Always retry when these exceptions are raised.
+    RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError, http.client.NotConnected,
+        http.client.IncompleteRead, http.client.ImproperConnectionState,
+        http.client.CannotSendRequest, http.client.CannotSendHeader,
+        http.client.ResponseNotReady, http.client.BadStatusLine)
+
+    # Always retry when an apiclient.errors.HttpError with one of these status codes is raised.
+    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
+
     response = None
     error = None
     retry = 0
@@ -193,14 +191,14 @@ def resumable_upload(insert_request):
                 if 'id' in response:
                     log.info(f'Video id "{response["id"]}" was successfully uploaded.')
                 else:
-                    sys.exit('The upload failed with an unexpected response: %s' % response)
+                    sys.exit(f'The upload failed with an unexpected response: {response}')
         except HttpError as e:
             if e.resp.status in RETRIABLE_STATUS_CODES:
-                error = 'A retriable HTTP error %d occurred:\n%s' % (e.resp.status, e.content)
+                error = f'A retriable HTTP error {e.resp.status} occurred:\n{e.content}'
             else:
                 raise
         except RETRIABLE_EXCEPTIONS as e:
-            error = 'A retriable error occurred: %s' % e
+            error = f'A retriable error occurred: {e}'
 
         if error is not None:
             log.error(error)
@@ -215,6 +213,8 @@ def resumable_upload(insert_request):
 
 
 def parse_args() -> argparse.Namespace:
+    VALID_PRIVACY_STATUSES = ('public', 'private', 'unlisted')
+
     argparser.add_argument('--file', required=True, help='Video file to upload')
     argparser.add_argument('--title', help='Video title', default='Test Title')
     argparser.add_argument('--description', default='Test Description', help='Video description')
@@ -231,12 +231,12 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-class Metadata(NamedTuple):
+class VodMetadata(NamedTuple):
     title: str
     description: str
 
 
-def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Dict[str, Metadata]:
+def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Dict[str, VodMetadata]:
     TWITCH_USER_ID = '603039092'
     params = {
         'user_id': TWITCH_USER_ID,
@@ -252,14 +252,15 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
     session = requests.Session()
     result = session.send(request)
     result.raise_for_status()
-    log.info(result.text)  # TODO
+    log.debug('Twitch result:')
+    log.debug(result.text)
 
     videos = result.json()['data']
     FILENAME_REGEX = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}.mp4$')
     DURATION_REGEX = re.compile(r'^((\d+)h)?((\d+)m)?((\d+)s)?$')
-    result: Dict[str, Metadata] = {}
+    result: Dict[str, VodMetadata] = {}
     for f in os.listdir(recordings_dir):
-        log.info(f'checking {f}...')  # TODO
+        log.debug(f'Checking filename: {f}')
         if FILENAME_REGEX.match(f):
             log.info(f'Processing {f}...')
             for video in videos:
@@ -278,7 +279,7 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
                 log.info('start_ts: %s, end_ts: %s', start_ts, end_ts)  # TODO
                 # TODO: add a small grace period
                 if start_ts <= vod_creation_ts <= end_ts:
-                    log.info(f'found matching video for {f}: %s', video)  # TODO
+                    log.info(f'Found matching video for {f}: {video}')
                     result[os.path.join(recordings_dir, f)] = VodMetadata(video['title'], video['description'])
                     break
 
@@ -287,9 +288,6 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
 
 def main():
     args = parse_args()
-
-    # TODO: email on failure
-    # TODO:   logs?
 
     # YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
     # youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', YOUTUBE_UPLOAD_SCOPE, args)
