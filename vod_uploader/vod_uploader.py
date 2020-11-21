@@ -163,11 +163,15 @@ def initialize_upload(youtube, options):
         media_body=MediaFileUpload(options.file, chunksize=-1, resumable=True)
     )
 
-    resumable_upload(insert_request)
+    _resumable_upload(insert_request)
+
+
+class UploadError(Exception):
+    pass
 
 
 # This method implements an exponential backoff strategy to resume a failed upload.
-def resumable_upload(insert_request):
+def _resumable_upload(insert_request) -> None:
     # Maximum number of times to retry before giving up.
     MAX_RETRIES = 10
 
@@ -178,7 +182,7 @@ def resumable_upload(insert_request):
         http.client.ResponseNotReady, http.client.BadStatusLine)
 
     # Always retry when an apiclient.errors.HttpError with one of these status codes is raised.
-    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
+    RETRIABLE_STATUS_CODES = {500, 502, 503, 504}
 
     response = None
     error = None
@@ -191,7 +195,7 @@ def resumable_upload(insert_request):
                 if 'id' in response:
                     log.info(f'Video id "{response["id"]}" was successfully uploaded.')
                 else:
-                    sys.exit(f'The upload failed with an unexpected response: {response}')
+                    raise UploadError(f'The upload failed with an unexpected response: {response}')
         except HttpError as e:
             if e.resp.status in RETRIABLE_STATUS_CODES:
                 error = f'A retriable HTTP error {e.resp.status} occurred:\n{e.content}'
@@ -204,7 +208,7 @@ def resumable_upload(insert_request):
             log.error(error)
             retry += 1
             if retry > MAX_RETRIES:
-                sys.exit('No longer attempting to retry.')
+                raise UploadError('No longer attempting to retry.')
 
             max_sleep = 2 ** retry
             sleep_seconds = random.random() * max_sleep
@@ -296,7 +300,7 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
     return result
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     # Set up OAuth
