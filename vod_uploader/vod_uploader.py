@@ -269,7 +269,7 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
     for f in os.listdir(recordings_dir):
         log.debug(f'Checking filename: {f}')
         if FILENAME_REGEX.match(f):
-            log.info(f'Processing {f}...')
+            log.info(f'Trying to find Twitch metadata for "{f}"...')
             for video in videos:
                 # There are some cases where the Twitch "created_at" timestamp comes *after* the local file creation timestamp,
                 # even if the local recording is started shortly after going live. Add a bit of a buffer to account for this.
@@ -289,13 +289,13 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
 
                 # Make sure we don't try to upload in-progress VODs
                 OLDNESS_THRESHOLD = datetime.timedelta(minutes=5)
-                if end_ts <= datetime.datetime.now(datetime.timezone.utc) - OLDNESS_THRESHOLD:
-                    if start_ts <= vod_creation_ts <= end_ts:
+                if start_ts <= vod_creation_ts <= end_ts:
+                    if end_ts <= datetime.datetime.now(datetime.timezone.utc) - OLDNESS_THRESHOLD:
                         log.info(f'Found matching video for {f}: {video}')
                         result[os.path.join(recordings_dir, f)] = VodMetadata(video['title'], video['description'])
-                        break
-                else:
-                    log.info(f'Skipping in-progress VOD: {f}')
+                    else:
+                        log.info(f'Skipping in-progress VOD: {f}')
+                    break
 
     return result
 
