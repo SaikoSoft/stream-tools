@@ -279,13 +279,16 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
                     vod_creation_ts = vod_creation_ts.replace(tzinfo=dateutil.tz.tzwinlocal())
                 else:
                     vod_creation_ts = vod_creation_ts.replace(tzinfo=dateutil.tz.tzlocal())
-                log.info('vod_creation_ts: %s', vod_creation_ts)  # TODO
-                log.info('start_ts: %s, end_ts: %s', start_ts, end_ts)  # TODO
-                # TODO: add a small grace period
-                if start_ts <= vod_creation_ts <= end_ts:
-                    log.info(f'Found matching video for {f}: {video}')
-                    result[os.path.join(recordings_dir, f)] = VodMetadata(video['title'], video['description'])
-                    break
+
+                # Make sure we don't try to upload in-progress VODs
+                OLDNESS_THRESHOLD = datetime.timedelta(minutes=5)
+                if end_ts <= datetime.datetime.now(datetime.timezone.utc) - OLDNESS_THRESHOLD:
+                    if start_ts <= vod_creation_ts <= end_ts:
+                        log.info(f'Found matching video for {f}: {video}')
+                        result[os.path.join(recordings_dir, f)] = VodMetadata(video['title'], video['description'])
+                        break
+                else:
+                    log.info(f'Skipping in-progress VOD: {f}')
 
     return result
 
