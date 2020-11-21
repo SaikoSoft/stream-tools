@@ -3,6 +3,7 @@
 import argparse
 import datetime
 import dateutil.parser
+from email.message import EmailMessage
 import http.client
 import httplib2
 import logging
@@ -11,10 +12,13 @@ import platform
 import random
 import re
 import requests
+import smtplib
 import sys
 import textwrap
 import time
-from typing import Dict, NamedTuple
+import traceback
+from types import TracebackType
+from typing import Collection, Dict, NamedTuple, Type
 
 from apiclient.discovery import build, Resource
 from apiclient.errors import HttpError
@@ -55,6 +59,41 @@ RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError, http.client.NotConnecte
 RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
 
 VALID_PRIVACY_STATUSES = ('public', 'private', 'unlisted')
+
+
+def send_plaintext_email(subject: str, body: str, to: Collection[str], sender: str, password: str) -> None:
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg['Subject'] = subject
+    msg['From'] = sender
+    msg['To'] = ','.join(to)
+
+    with smtplib.SMTP('smtp.gmail.com', 587) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(sender, password)
+        server.send_message(msg)
+
+
+def on_uncaught_exception(exc_type: Type[BaseException], exc_value: BaseException, exc_traceback: TracebackType) -> None:
+    # Default exception handler (print traceback to stderr)
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    # Send error email
+    password = open('email_password.txt').read().strip()
+    msg = f"""
+Uncaught {exc_type.__name__}: {exc_value}
+
+{''.join(traceback.format_tb(exc_traceback))}
+    """
+    send_plaintext_email(
+        subject=f'[{THIS_SCRIPT}] Uncaught {exc_type.__name__}',
+        body=msg,
+        to=['saikosoft.dev@gmail.com'],
+        sender='saikosoft.dev@gmail.com',
+        password=password,
+    )
+sys.excepthook = on_uncaught_exception
 
 
 def get_oauth_credentials(
@@ -237,6 +276,7 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
                     vod_creation_ts = vod_creation_ts.replace(tzinfo=dateutil.tz.tzlocal())
                 log.info('vod_creation_ts: %s', vod_creation_ts)  # TODO
                 log.info('start_ts: %s, end_ts: %s', start_ts, end_ts)  # TODO
+                # TODO: add a small grace period
                 if start_ts <= vod_creation_ts <= end_ts:
                     log.info(f'found matching video for {f}: %s', video)  # TODO
                     result[os.path.join(recordings_dir, f)] = VodMetadata(video['title'], video['description'])

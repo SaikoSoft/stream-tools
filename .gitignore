@@ -1,5 +1,6 @@
 client_secrets_*.json
 vod_uploader-*-oauth2.json
+email_password.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
