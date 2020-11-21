@@ -12,13 +12,14 @@ import platform
 import random
 import re
 import requests
+import shutil
 import smtplib
 import sys
 import textwrap
 import time
 import traceback
 from types import TracebackType
-from typing import Collection, Dict, NamedTuple, Optional, Type
+from typing import Collection, Dict, List, NamedTuple, Optional, Type
 
 from apiclient.discovery import build, Resource
 from apiclient.errors import HttpError
@@ -299,6 +300,26 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
     return result
 
 
+def listdir_absolute(d: str) -> List[str]:
+    return [os.path.join(d, f) for f in os.listdir(d)]
+
+
+def clean_archive(archive_dir: str, dry_run: bool = False) -> None:
+    log.info('Considering archive cleanup')
+    MIN_COUNT = 100
+    MAX_SIZE_BYTES = 1_000_000_000_000
+    archive_files = listdir_absolute(archive_dir)
+    file_sizes = {f: os.path.getsize(f) for f in archive_files}
+    while len(file_sizes) > MIN_COUNT and sum(file_sizes.values()) > MAX_SIZE_BYTES:
+        oldest_file = sorted(file_sizes.keys())[0]  # Filenames are of the form YYYY-mm-dd_HH-MM-SS.mp4
+        if not dry_run:
+            log.info(f'Deleting {oldest_file}')
+            os.remove(oldest_file)
+        else:
+            log.info(f'Would have deleted {oldest_file}')
+        file_sizes.pop(oldest_file)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -311,7 +332,6 @@ def main() -> None:
 
     # Find titles and descriptions for videos that are staged for uploading
     metadata = find_vod_metadata(RECORDINGS_DIR, twitch_credentials)
-    log.info('metadata: %s', metadata)  # TODO
 
     if args.upload:
         # Do the upload
@@ -328,13 +348,15 @@ def main() -> None:
                 tags=['game engine', 'game development', 'indie', 'programming', 'coding', 'stream'],
             )
 
-        # Move uploaded file to archive
-        if args.move_finished_to_archive:
-            pass  # TODO
+            # Move uploaded file to archive
+            if args.move_finished_to_archive:
+                log.info(f'Moving {filename} to {ARCHIVE_DIR}')
+                shutil.move(filename, ARCHIVE_DIR)
+            else:
+                log.info(f'Would have moved {filename} to {ARCHIVE_DIR}')
 
     # Clean old files from archive
-    if args.clean_archive:
-        pass  # TODO
+    clean_archive(ARCHIVE_DIR, dry_run=not args.clean_archive)
 
 
 if __name__ == '__main__':
