@@ -264,7 +264,11 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
         if FILENAME_REGEX.match(f):
             log.info(f'Processing {f}...')
             for video in videos:
+                # There are some cases where the Twitch "created_at" timestamp comes *after* the local file creation timestamp,
+                # even if the local recording is started shortly after going live. Add a bit of a buffer to account for this.
+                GRACE_PERIOD = datetime.timedelta(seconds=30)
                 start_ts = dateutil.parser.isoparse(video['created_at'])
+                start_ts = start_ts - GRACE_PERIOD
                 match = DURATION_REGEX.match(video['duration'])
                 assert match
                 duration = datetime.timedelta(hours=int(match[2] or 0), minutes=int(match[4] or 0), seconds=int(match[6] or 0))
