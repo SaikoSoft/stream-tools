@@ -18,7 +18,7 @@ import textwrap
 import time
 import traceback
 from types import TracebackType
-from typing import Collection, Dict, NamedTuple, Type
+from typing import Collection, Dict, NamedTuple, Optional, Type
 
 from apiclient.discovery import build, Resource
 from apiclient.errors import HttpError
@@ -131,20 +131,24 @@ def get_authenticated_service(
     return build(service_name, api_version, http=credentials.authorize(httplib2.Http()))
 
 
-def initialize_upload(youtube, options):
-    tags = None
-    if options.keywords:
-        tags = options.keywords.split(',')
-
+def upload_video_to_youtube(
+        youtube: Resource,
+        filename: str,
+        title: str,
+        description: str,
+        category: str,
+        privacy: str,
+        tags: Optional[Collection[str]] = None,
+) -> None:
     body = {
         'snippet': {
-            'title': options.title,
-            'description': options.description,
+            'title': title,
+            'description': description,
             'tags': tags,
-            'categoryId': options.category,
+            'categoryId': category,
         },
         'status': {
-            'privacyStatus': options.privacyStatus,
+            'privacyStatus': privacy,
         },
     }
 
@@ -160,7 +164,7 @@ def initialize_upload(youtube, options):
         # request. (If the upload fails, it will still be retried where it left off.) This is usually a best practice,
         # but if you're using Python older than 2.6 or if you're running on App Engine, you should set the chunksize to
         # something like 1024 * 1024 (1 megabyte).
-        media_body=MediaFileUpload(options.file, chunksize=-1, resumable=True)
+        media_body=MediaFileUpload(filename, chunksize=-1, resumable=True),
     )
 
     _resumable_upload(insert_request)
@@ -219,21 +223,11 @@ def _resumable_upload(insert_request) -> None:
 def parse_args() -> argparse.Namespace:
     VALID_PRIVACY_STATUSES = ('public', 'private', 'unlisted')
 
-    argparser.add_argument('--file', required=True, help='Video file to upload')
-    argparser.add_argument('--title', help='Video title', default='Test Title')
-    argparser.add_argument('--description', default='Test Description', help='Video description')
-    argparser.add_argument('--category', default='22',
-                           help='Numeric video category. See https://developers.google.com/youtube/v3/docs/videoCategories/list')
-    argparser.add_argument('--keywords', default='', help='Video keywords, comma separated')
-    argparser.add_argument('--privacyStatus', choices=VALID_PRIVACY_STATUSES, default=VALID_PRIVACY_STATUSES[0],
-                           help='Video privacy status.')
     argparser.add_argument('--upload', action='store_true', help='Do YouTube upload step')
     argparser.add_argument('--move-finished-to-archive', action='store_true', help='Move finished uploads to archive directory')
     argparser.add_argument('--clean-archive', action='store_true', help='Clean old videos from archive directory')
+    argparser.add_argument('--privacy-status', choices=VALID_PRIVACY_STATUSES, default='private', help='Video privacy status')
     args = argparser.parse_args()
-
-    if not os.path.exists(args.file):
-        argparser.error('Please specify a valid file using the --file= parameter.')
 
     return args
 
@@ -315,7 +309,17 @@ def main() -> None:
     if args.upload:
         # Do the upload
         youtube = get_authenticated_service('youtube', 'v3', youtube_credentials)
-        initialize_upload(youtube, args)
+        for filename, (title, description) in metadata.items():
+            log.info(f'Uploading "{title}" ({filename})')
+            upload_video_to_youtube(
+                youtube,
+                filename,
+                title=title,
+                description=description,
+                category='28',  # "Science & Technology"
+                privacy=args.privacy_status,
+                tags=['game engine', 'game development', 'indie', 'programming', 'coding', 'stream'],
+            )
 
         # Move uploaded file to archive
         if args.move_finished_to_archive:
