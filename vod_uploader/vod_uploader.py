@@ -212,11 +212,12 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
     request = request.prepare()
     session = requests.Session()
     result = session.send(request)
+    result.raise_for_status()
     log.info(result.text)  # TODO
 
     videos = result.json()['data']
     FILENAME_REGEX = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}.mp4$')
-    DURATION_REGEX = re.compile(r'^(\d+)h(\d+)m(\d+)s$')
+    DURATION_REGEX = re.compile(r'^((\d+)h)?((\d+)m)?((\d+)s)?$')
     result: Dict[str, Metadata] = {}
     for f in os.listdir(recordings_dir):
         log.info(f'checking {f}...')  # TODO
@@ -226,8 +227,7 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
                 start_ts = dateutil.parser.isoparse(video['created_at'])
                 match = DURATION_REGEX.match(video['duration'])
                 assert match
-                assert len(match.groups()) == 3
-                duration = datetime.timedelta(hours=int(match[1]), minutes=int(match[2]), seconds=int(match[3]))
+                duration = datetime.timedelta(hours=int(match[2] or 0), minutes=int(match[4] or 0), seconds=int(match[6] or 0))
                 end_ts = start_ts + duration
 
                 vod_creation_ts = datetime.datetime.strptime(f, '%Y-%m-%d_%H-%M-%S.mp4')
