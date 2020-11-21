@@ -38,9 +38,14 @@ ARCHIVE_DIR = os.path.join(RECORDINGS_DIR, 'archive')
 THIS_SCRIPT = os.path.splitext(os.path.basename(__file__))[0]
 LOG_FILE_NAME = f'{THIS_SCRIPT}_{datetime.datetime.now():%Y%m%d_%H%M%S}.log'
 log = logging.getLogger(__name__)
-log.setLevel(logging.INFO)
-log.addHandler(logging.StreamHandler(sys.stdout))
-log.addHandler(logging.FileHandler(os.path.join(RECORDINGS_DIR, 'logs', LOG_FILE_NAME)))
+log.setLevel(logging.DEBUG)
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+log.addHandler(stdout_handler)
+
+file_handler = logging.FileHandler(os.path.join(RECORDINGS_DIR, 'logs', LOG_FILE_NAME))
+file_handler.setLevel(logging.DEBUG)
+log.addHandler(file_handler)
 
 
 # Explicitly tell the underlying HTTP transport library not to retry, since we are handling retry logic ourselves.
@@ -296,6 +301,8 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
 
 def main() -> None:
     args = parse_args()
+
+    stdout_handler.setLevel(args.logging_level)
 
     # Set up OAuth
     YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
