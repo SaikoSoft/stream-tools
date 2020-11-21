@@ -223,6 +223,9 @@ def parse_args() -> argparse.Namespace:
     argparser.add_argument('--keywords', default='', help='Video keywords, comma separated')
     argparser.add_argument('--privacyStatus', choices=VALID_PRIVACY_STATUSES, default=VALID_PRIVACY_STATUSES[0],
                            help='Video privacy status.')
+    argparser.add_argument('--upload', action='store_true', help='Do YouTube upload step')
+    argparser.add_argument('--move-finished-to-archive', action='store_true', help='Move finished uploads to archive directory')
+    argparser.add_argument('--clean-archive', action='store_true', help='Clean old videos from archive directory')
     args = argparser.parse_args()
 
     if not os.path.exists(args.file):
@@ -296,22 +299,27 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
 def main():
     args = parse_args()
 
-    # YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
-    # youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', YOUTUBE_UPLOAD_SCOPE, args)
+    # Set up OAuth
+    YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
+    youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', YOUTUBE_UPLOAD_SCOPE, args)
     twitch_credentials = get_oauth_credentials('twitch', 'client_secrets_twitch.json', '', args)
 
+    # Find titles and descriptions for videos that are staged for uploading
     metadata = find_vod_metadata(RECORDINGS_DIR, twitch_credentials)
     log.info('metadata: %s', metadata)  # TODO
 
-    # try:
-    #     youtube = get_authenticated_service('youtube', 'v3', youtube_credentials)
-    #     initialize_upload(youtube, args)
-    # except HttpError as e:
-    #     log.error(f'An HTTP error {e.resp.status} occurred:\n{e.content}')
+    if args.upload:
+        # Do the upload
+        youtube = get_authenticated_service('youtube', 'v3', youtube_credentials)
+        initialize_upload(youtube, args)
 
-    # TODO: move file to archive
+        # Move uploaded file to archive
+        if args.move_finished_to_archive:
+            pass  # TODO
 
-    # TODO: clean old files from archive
+    # Clean old files from archive
+    if args.clean_archive:
+        pass  # TODO
 
 
 if __name__ == '__main__':
