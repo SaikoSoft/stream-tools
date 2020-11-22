@@ -71,20 +71,21 @@ def on_uncaught_exception(exc_type: Type[BaseException], exc_value: BaseExceptio
     # Default exception handler (print traceback to stderr)
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
-    # Send error email
-    password = open('email_password.txt').read().strip()
-    msg = f"""
-Uncaught {exc_type.__name__}: {exc_value}
+    if exc_type != KeyboardInterrupt:
+        # Send error email
+        password = open('email_password.txt').read().strip()
+        msg = f"""
+    Uncaught {exc_type.__name__}: {exc_value}
 
-{''.join(traceback.format_tb(exc_traceback))}
-    """
-    send_plaintext_email(
-        subject=f'[{THIS_SCRIPT}] Uncaught {exc_type.__name__}',
-        body=msg,
-        to=['saikosoft.dev@gmail.com'],
-        sender='saikosoft.dev@gmail.com',
-        password=password,
-    )
+    {''.join(traceback.format_tb(exc_traceback))}
+        """
+        send_plaintext_email(
+            subject=f'[{THIS_SCRIPT}] Uncaught {exc_type.__name__}',
+            body=msg,
+            to=['saikosoft.dev@gmail.com'],
+            sender='saikosoft.dev@gmail.com',
+            password=password,
+        )
 sys.excepthook = on_uncaught_exception
 
 
