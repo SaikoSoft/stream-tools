@@ -123,6 +123,7 @@ def get_oauth_credentials(
     storage = Storage(f'{THIS_SCRIPT}-{service_name}-oauth2.json')
     credentials = storage.get()
 
+    # TODO: twitch does not renew itself after expiring
     if credentials is None or credentials.invalid:
         flow = flow_from_clientsecrets(secrets_file, scope=scope, message=MISSING_CLIENT_SECRETS_MESSAGE)
         credentials = run_flow(flow, storage, auth_server_args)
@@ -133,7 +134,7 @@ def get_oauth_credentials(
 def get_authenticated_service(
         service_name: str,
         api_version: str,
-        credentials: OAuth2Credentials
+        credentials: OAuth2Credentials,
 ) -> Resource:
     return build(service_name, api_version, http=credentials.authorize(httplib2.Http()))
 
@@ -147,6 +148,7 @@ def upload_video_to_youtube(
         privacy: str,
         tags: Optional[Collection[str]] = None,
 ) -> None:
+    # TODO: schedule release for 24h after stream end
     body = {
         'snippet': {
             'title': title,
@@ -245,6 +247,7 @@ class VodMetadata(NamedTuple):
 
 
 def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Dict[str, VodMetadata]:
+    log.info('Looking up VOD metadata from Twitch')
     TWITCH_USER_ID = '603039092'
     params = {
         'user_id': TWITCH_USER_ID,
@@ -327,6 +330,7 @@ def main() -> None:
     stdout_handler.setLevel(args.logging_level)
 
     # Set up OAuth
+    log.info('Establishing API credentials')
     YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
     youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', YOUTUBE_UPLOAD_SCOPE, args)
     twitch_credentials = get_oauth_credentials('twitch', 'client_secrets_twitch.json', '', args)
