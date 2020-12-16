@@ -123,7 +123,6 @@ def get_oauth_credentials(
     storage = Storage(f'{THIS_SCRIPT}-{service_name}-oauth2.json')
     credentials = storage.get()
 
-    # TODO: twitch does not renew itself after expiring
     if credentials is None or credentials.invalid:
         flow = flow_from_clientsecrets(secrets_file, scope=scope, message=MISSING_CLIENT_SECRETS_MESSAGE)
         credentials = run_flow(flow, storage, auth_server_args)
@@ -334,6 +333,9 @@ def main() -> None:
     YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
     youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', YOUTUBE_UPLOAD_SCOPE, args)
     twitch_credentials = get_oauth_credentials('twitch', 'client_secrets_twitch.json', '', args)
+    # The YouTube API client handles refreshing tokens automatically, but for Twitch I have to handle it myself
+    log.info('Refreshing Twitch token')
+    twitch_credentials.refresh(httplib2.Http())
 
     # Find titles and descriptions for videos that are staged for uploading
     metadata = find_vod_metadata(RECORDINGS_DIR, twitch_credentials)
