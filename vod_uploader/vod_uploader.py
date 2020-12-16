@@ -89,6 +89,92 @@ def on_uncaught_exception(exc_type: Type[BaseException], exc_value: BaseExceptio
 sys.excepthook = on_uncaught_exception
 
 
+class UploadError(Exception):
+    pass
+
+
+class PlaylistError(Exception):
+    pass
+
+
+class VodMetadata(NamedTuple):
+    title: str
+    description: str
+    start_ts: datetime.datetime
+    end_ts: datetime.datetime
+
+
+def parse_args() -> argparse.Namespace:
+    VALID_PRIVACY_STATUSES = ('public', 'private', 'unlisted')
+
+    argparser.add_argument('--upload', action='store_true', help='Do YouTube upload step')
+    argparser.add_argument('--add-to-playlist', action='store_true', help='Add the uploaded video to a matching playlist')
+    argparser.add_argument('--move-finished-to-archive', action='store_true', help='Move finished uploads to archive directory')
+    argparser.add_argument('--clean-archive', action='store_true', help='Clean old videos from archive directory')
+    argparser.add_argument('--privacy-status', choices=VALID_PRIVACY_STATUSES, default='private', help='Video privacy status')
+    argparser.add_argument('--schedule', action='store_true',
+                           help='Schedule for future time instead of publishing immediately. Implies --privacy-status=private')
+    args = argparser.parse_args()
+
+    if args.schedule:
+        args.privacy_status = 'private'  # Required when using status.publishAt
+
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+
+    stdout_handler.setLevel(args.logging_level)
+
+    # Set up OAuth
+    log.info('Establishing API credentials')
+    YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube'
+    YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
+    youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', [YOUTUBE_SCOPE, YOUTUBE_UPLOAD_SCOPE], args)
+    twitch_credentials = get_oauth_credentials('twitch', 'client_secrets_twitch.json', [''], args)
+    # The YouTube API client handles refreshing tokens automatically, but for Twitch I have to handle it myself
+    log.info('Refreshing Twitch token')
+    twitch_credentials.refresh(httplib2.Http())
+
+    # Find titles and descriptions for videos that are staged for uploading
+    metadata = find_vod_metadata(RECORDINGS_DIR, twitch_credentials)
+
+    if args.upload:
+        # Do the upload
+        youtube = get_authenticated_service('youtube', 'v3', youtube_credentials)
+        for filename, (title, description, start_ts, end_ts) in metadata.items():
+            publish_at = None
+            if args.schedule:
+                publish_at = end_ts + datetime.timedelta(days=1)  # 24 hours after stream end per Twitch affiliate/parter TOS
+                log.info(f'Uploading "{title}" ({filename}) to be published at {publish_at}')
+            else:
+                log.info(f'Uploading "{title}" ({filename})')
+            video_id = upload_video_to_youtube(
+                youtube,
+                filename,
+                title=title,
+                description=description,
+                category='28',  # "Science & Technology"
+                privacy=args.privacy_status,
+                publish_at=publish_at,
+                tags=['game engine', 'game development', 'indie', 'programming', 'coding', 'stream'],
+            )
+
+            if args.add_to_playlist:
+                add_video_to_matching_playlist(youtube, title, video_id)
+
+            # Move uploaded file to archive
+            if args.move_finished_to_archive:
+                log.info(f'Moving {filename} to {ARCHIVE_DIR}')
+                shutil.move(filename, ARCHIVE_DIR)
+            else:
+                log.info(f'Would have moved {filename} to {ARCHIVE_DIR}')
+
+    # Clean old files from archive
+    clean_archive(ARCHIVE_DIR, dry_run=not args.clean_archive)
+
+
 def get_oauth_credentials(
         service_name: str,
         secrets_file: str,
@@ -128,167 +214,6 @@ def get_oauth_credentials(
         credentials = run_flow(flow, storage, auth_server_args)
 
     return credentials
-
-
-def get_authenticated_service(
-        service_name: str,
-        api_version: str,
-        credentials: OAuth2Credentials,
-) -> Resource:
-    return build(service_name, api_version, http=credentials.authorize(httplib2.Http()))
-
-
-def upload_video_to_youtube(
-        youtube: Resource,
-        filename: str,
-        title: str,
-        description: str,
-        category: str,
-        privacy: str,
-        publish_at: Optional[datetime.datetime] = None,
-        tags: Optional[Collection[str]] = None,
-) -> str:
-    body = {
-        'snippet': {
-            'title': title,
-            'description': description,
-            'tags': tags,
-            'categoryId': category,
-        },
-        'status': {
-            'privacyStatus': privacy,
-        },
-    }
-    if publish_at is not None:
-        body['status']['publishAt'] = publish_at.isoformat()
-
-    # Call the API's videos.insert method to create and upload the video.
-    insert_request = youtube.videos().insert(
-        part=','.join(body.keys()),
-        body=body,
-        # The chunksize parameter specifies the size of each chunk of data, in bytes, that will be uploaded at a time.
-        # Set a higher value for reliable connections as fewer chunks lead to faster uploads. Set a lower value for
-        # better recovery on less reliable connections.
-        #
-        # Setting 'chunksize' equal to -1 in the code below means that the entire file will be uploaded in a single HTTP
-        # request. (If the upload fails, it will still be retried where it left off.) This is usually a best practice,
-        # but if you're using Python older than 2.6 or if you're running on App Engine, you should set the chunksize to
-        # something like 1024 * 1024 (1 megabyte).
-        media_body=MediaFileUpload(filename, chunksize=-1, resumable=True),
-    )
-
-    return _resumable_upload(insert_request)
-
-
-def add_video_to_matching_playlist(youtube: Resource, title: str, video_id: str) -> None:
-    VALID_PLAYLISTS = {
-        re.compile(r'^Game Engine '): 'PLDKWjXpoaOxtT0OyavgpNPiqH8PL-AjY4',
-        re.compile(r'^Bonus Stream '): 'PLDKWjXpoaOxsF_5Lc_zsR0lJTh0viGSIK',
-    }
-
-    playlist_id = [p_id for regex, p_id in VALID_PLAYLISTS.items() if regex.match(title)]
-    if len(playlist_id) != 1:
-        raise PlaylistError(f'Could not determine playlist for video "{title}" ({video_id})')
-    playlist_id = playlist_id[0]
-
-    body = {
-        'snippet': {
-            'playlistId': playlist_id,
-            'resourceId': {
-                'kind': 'youtube#video',
-                'videoId': video_id,
-            },
-        },
-    }
-    insert_request = youtube.playlistItems().insert(
-        part=','.join(body.keys()),
-        body=body,
-    )
-    response = insert_request.execute(num_retries=3)
-    if response is not None and 'id' in response:
-        log.info(f'Playlist item {response["id"]} was successfully added.')
-    else:
-        raise PlaylistError(f'Invalid response: {response}')
-
-
-class UploadError(Exception):
-    pass
-
-
-class PlaylistError(Exception):
-    pass
-
-
-# This method implements an exponential backoff strategy to resume a failed upload.
-def _resumable_upload(insert_request) -> str:
-    # Maximum number of times to retry before giving up.
-    MAX_RETRIES = 10
-
-    # Always retry when these exceptions are raised.
-    RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError, http.client.NotConnected,
-        http.client.IncompleteRead, http.client.ImproperConnectionState,
-        http.client.CannotSendRequest, http.client.CannotSendHeader,
-        http.client.ResponseNotReady, http.client.BadStatusLine)
-
-    # Always retry when an apiclient.errors.HttpError with one of these status codes is raised.
-    RETRIABLE_STATUS_CODES = {500, 502, 503, 504}
-
-    response = None
-    error = None
-    retry = 0
-    while response is None:
-        try:
-            log.info('Uploading file...')
-            status, response = insert_request.next_chunk()
-            if response is not None:
-                if 'id' in response:
-                    log.info(f'Video id "{response["id"]}" was successfully uploaded.')
-                    return response['id']
-                else:
-                    raise UploadError(f'The upload failed with an unexpected response: {response}')
-        except HttpError as e:
-            if e.resp.status in RETRIABLE_STATUS_CODES:
-                error = f'A retriable HTTP error {e.resp.status} occurred:\n{e.content}'
-            else:
-                raise
-        except RETRIABLE_EXCEPTIONS as e:
-            error = f'A retriable error occurred: {e}'
-
-        if error is not None:
-            log.error(error)
-            retry += 1
-            if retry > MAX_RETRIES:
-                raise UploadError('No longer attempting to retry.')
-
-            max_sleep = 2 ** retry
-            sleep_seconds = random.random() * max_sleep
-            log.info(f'Sleeping {sleep_seconds} seconds and then retrying...')
-            time.sleep(sleep_seconds)
-
-
-def parse_args() -> argparse.Namespace:
-    VALID_PRIVACY_STATUSES = ('public', 'private', 'unlisted')
-
-    argparser.add_argument('--upload', action='store_true', help='Do YouTube upload step')
-    argparser.add_argument('--add-to-playlist', action='store_true', help='Add the uploaded video to a matching playlist')
-    argparser.add_argument('--move-finished-to-archive', action='store_true', help='Move finished uploads to archive directory')
-    argparser.add_argument('--clean-archive', action='store_true', help='Clean old videos from archive directory')
-    argparser.add_argument('--privacy-status', choices=VALID_PRIVACY_STATUSES, default='private', help='Video privacy status')
-    argparser.add_argument('--schedule', action='store_true',
-                           help='Schedule for future time instead of publishing immediately. Implies --privacy-status=private')
-    args = argparser.parse_args()
-
-    if args.schedule:
-        args.privacy_status = 'private'  # Required when using status.publishAt
-
-    return args
-
-
-class VodMetadata(NamedTuple):
-    title: str
-    description: str
-    start_ts: datetime.datetime
-    end_ts: datetime.datetime
 
 
 def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Dict[str, VodMetadata]:
@@ -349,6 +274,134 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
     return result
 
 
+def get_authenticated_service(
+        service_name: str,
+        api_version: str,
+        credentials: OAuth2Credentials,
+) -> Resource:
+    return build(service_name, api_version, http=credentials.authorize(httplib2.Http()))
+
+
+def upload_video_to_youtube(
+        youtube: Resource,
+        filename: str,
+        title: str,
+        description: str,
+        category: str,
+        privacy: str,
+        publish_at: Optional[datetime.datetime] = None,
+        tags: Optional[Collection[str]] = None,
+) -> str:
+    body = {
+        'snippet': {
+            'title': title,
+            'description': description,
+            'tags': tags,
+            'categoryId': category,
+        },
+        'status': {
+            'privacyStatus': privacy,
+        },
+    }
+    if publish_at is not None:
+        body['status']['publishAt'] = publish_at.isoformat()
+
+    # Call the API's videos.insert method to create and upload the video.
+    insert_request = youtube.videos().insert(
+        part=','.join(body.keys()),
+        body=body,
+        # The chunksize parameter specifies the size of each chunk of data, in bytes, that will be uploaded at a time.
+        # Set a higher value for reliable connections as fewer chunks lead to faster uploads. Set a lower value for
+        # better recovery on less reliable connections.
+        #
+        # Setting 'chunksize' equal to -1 in the code below means that the entire file will be uploaded in a single HTTP
+        # request. (If the upload fails, it will still be retried where it left off.) This is usually a best practice,
+        # but if you're using Python older than 2.6 or if you're running on App Engine, you should set the chunksize to
+        # something like 1024 * 1024 (1 megabyte).
+        media_body=MediaFileUpload(filename, chunksize=-1, resumable=True),
+    )
+
+    return _resumable_upload(insert_request)
+
+
+# This method implements an exponential backoff strategy to resume a failed upload.
+def _resumable_upload(insert_request) -> str:
+    # Maximum number of times to retry before giving up.
+    MAX_RETRIES = 10
+
+    # Always retry when these exceptions are raised.
+    RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError, http.client.NotConnected,
+        http.client.IncompleteRead, http.client.ImproperConnectionState,
+        http.client.CannotSendRequest, http.client.CannotSendHeader,
+        http.client.ResponseNotReady, http.client.BadStatusLine)
+
+    # Always retry when an apiclient.errors.HttpError with one of these status codes is raised.
+    RETRIABLE_STATUS_CODES = {500, 502, 503, 504}
+
+    response = None
+    error = None
+    retry = 0
+    while response is None:
+        try:
+            log.info('Uploading file...')
+            status, response = insert_request.next_chunk()
+            if response is not None:
+                if 'id' in response:
+                    log.info(f'Video id "{response["id"]}" was successfully uploaded.')
+                    return response['id']
+                else:
+                    raise UploadError(f'The upload failed with an unexpected response: {response}')
+        except HttpError as e:
+            if e.resp.status in RETRIABLE_STATUS_CODES:
+                error = f'A retriable HTTP error {e.resp.status} occurred:\n{e.content}'
+            else:
+                raise
+        except RETRIABLE_EXCEPTIONS as e:
+            error = f'A retriable error occurred: {e}'
+
+        if error is not None:
+            log.error(error)
+            retry += 1
+            if retry > MAX_RETRIES:
+                raise UploadError('No longer attempting to retry.')
+
+            max_sleep = 2 ** retry
+            sleep_seconds = random.random() * max_sleep
+            log.info(f'Sleeping {sleep_seconds} seconds and then retrying...')
+            time.sleep(sleep_seconds)
+
+
+def add_video_to_matching_playlist(youtube: Resource, title: str, video_id: str) -> None:
+    VALID_PLAYLISTS = {
+        re.compile(r'^Game Engine '): 'PLDKWjXpoaOxtT0OyavgpNPiqH8PL-AjY4',
+        re.compile(r'^Bonus Stream '): 'PLDKWjXpoaOxsF_5Lc_zsR0lJTh0viGSIK',
+    }
+
+    playlist_id = [p_id for regex, p_id in VALID_PLAYLISTS.items() if regex.match(title)]
+    if len(playlist_id) != 1:
+        raise PlaylistError(f'Could not determine playlist for video "{title}" ({video_id})')
+    playlist_id = playlist_id[0]
+
+    body = {
+        'snippet': {
+            'playlistId': playlist_id,
+            'resourceId': {
+                'kind': 'youtube#video',
+                'videoId': video_id,
+            },
+        },
+    }
+    insert_request = youtube.playlistItems().insert(
+        part=','.join(body.keys()),
+        body=body,
+    )
+    response = insert_request.execute(num_retries=3)
+    if response is not None and 'id' in response:
+        log.info(f'Playlist item {response["id"]} was successfully added.')
+    else:
+        raise PlaylistError(f'Invalid response: {response}')
+
+
 def listdir_absolute(d: str) -> List[str]:
     return [os.path.join(d, f) for f in os.listdir(d)]
 
@@ -367,59 +420,6 @@ def clean_archive(archive_dir: str, dry_run: bool = False) -> None:
         else:
             log.info(f'Would have deleted {oldest_file}')
         file_sizes.pop(oldest_file)
-
-
-def main() -> None:
-    args = parse_args()
-
-    stdout_handler.setLevel(args.logging_level)
-
-    # Set up OAuth
-    log.info('Establishing API credentials')
-    YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube'
-    YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
-    youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', [YOUTUBE_SCOPE, YOUTUBE_UPLOAD_SCOPE], args)
-    twitch_credentials = get_oauth_credentials('twitch', 'client_secrets_twitch.json', [''], args)
-    # The YouTube API client handles refreshing tokens automatically, but for Twitch I have to handle it myself
-    log.info('Refreshing Twitch token')
-    twitch_credentials.refresh(httplib2.Http())
-
-    # Find titles and descriptions for videos that are staged for uploading
-    metadata = find_vod_metadata(RECORDINGS_DIR, twitch_credentials)
-
-    if args.upload:
-        # Do the upload
-        youtube = get_authenticated_service('youtube', 'v3', youtube_credentials)
-        for filename, (title, description, start_ts, end_ts) in metadata.items():
-            publish_at = None
-            if args.schedule:
-                publish_at = end_ts + datetime.timedelta(days=1)  # 24 hours after stream end per Twitch affiliate/parter TOS
-                log.info(f'Uploading "{title}" ({filename}) to be published at {publish_at}')
-            else:
-                log.info(f'Uploading "{title}" ({filename})')
-            video_id = upload_video_to_youtube(
-                youtube,
-                filename,
-                title=title,
-                description=description,
-                category='28',  # "Science & Technology"
-                privacy=args.privacy_status,
-                publish_at=publish_at,
-                tags=['game engine', 'game development', 'indie', 'programming', 'coding', 'stream'],
-            )
-
-            if args.add_to_playlist:
-                add_video_to_matching_playlist(youtube, title, video_id)
-
-            # Move uploaded file to archive
-            if args.move_finished_to_archive:
-                log.info(f'Moving {filename} to {ARCHIVE_DIR}')
-                shutil.move(filename, ARCHIVE_DIR)
-            else:
-                log.info(f'Would have moved {filename} to {ARCHIVE_DIR}')
-
-    # Clean old files from archive
-    clean_archive(ARCHIVE_DIR, dry_run=not args.clean_archive)
 
 
 if __name__ == '__main__':
