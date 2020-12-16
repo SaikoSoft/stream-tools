@@ -92,7 +92,7 @@ sys.excepthook = on_uncaught_exception
 def get_oauth_credentials(
         service_name: str,
         secrets_file: str,
-        scope: str,
+        scopes: Collection[str],
         auth_server_args: argparse.Namespace,
 ) -> OAuth2Credentials:
     # The secrets_file variable specifies the name of a file that contains the OAuth 2.0 information for this
@@ -124,7 +124,7 @@ def get_oauth_credentials(
     credentials = storage.get()
 
     if credentials is None or credentials.invalid:
-        flow = flow_from_clientsecrets(secrets_file, scope=scope, message=MISSING_CLIENT_SECRETS_MESSAGE)
+        flow = flow_from_clientsecrets(secrets_file, scope=scopes, message=MISSING_CLIENT_SECRETS_MESSAGE)
         credentials = run_flow(flow, storage, auth_server_args)
 
     return credentials
@@ -147,7 +147,7 @@ def upload_video_to_youtube(
         privacy: str,
         publish_at: Optional[datetime.datetime] = None,
         tags: Optional[Collection[str]] = None,
-) -> None:
+) -> str:
     body = {
         'snippet': {
             'title': title,
@@ -177,15 +177,50 @@ def upload_video_to_youtube(
         media_body=MediaFileUpload(filename, chunksize=-1, resumable=True),
     )
 
-    _resumable_upload(insert_request)
+    return _resumable_upload(insert_request)
+
+
+def add_video_to_matching_playlist(youtube: Resource, title: str, video_id: str) -> None:
+    VALID_PLAYLISTS = {
+        re.compile(r'^Game Engine '): 'PLDKWjXpoaOxtT0OyavgpNPiqH8PL-AjY4',
+        re.compile(r'^Bonus Stream '): 'PLDKWjXpoaOxsF_5Lc_zsR0lJTh0viGSIK',
+    }
+
+    playlist_id = [p_id for regex, p_id in VALID_PLAYLISTS.items() if regex.match(title)]
+    if len(playlist_id) != 1:
+        raise PlaylistError(f'Could not determine playlist for video "{title}" ({video_id})')
+    playlist_id = playlist_id[0]
+
+    body = {
+        'snippet': {
+            'playlistId': playlist_id,
+            'resourceId': {
+                'kind': 'youtube#video',
+                'videoId': video_id,
+            },
+        },
+    }
+    insert_request = youtube.playlistItems().insert(
+        part=','.join(body.keys()),
+        body=body,
+    )
+    response = insert_request.execute(num_retries=3)
+    if response is not None and 'id' in response:
+        log.info(f'Playlist item {response["id"]} was successfully added.')
+    else:
+        raise PlaylistError(f'Invalid response: {response}')
 
 
 class UploadError(Exception):
     pass
 
 
+class PlaylistError(Exception):
+    pass
+
+
 # This method implements an exponential backoff strategy to resume a failed upload.
-def _resumable_upload(insert_request) -> None:
+def _resumable_upload(insert_request) -> str:
     # Maximum number of times to retry before giving up.
     MAX_RETRIES = 10
 
@@ -208,6 +243,7 @@ def _resumable_upload(insert_request) -> None:
             if response is not None:
                 if 'id' in response:
                     log.info(f'Video id "{response["id"]}" was successfully uploaded.')
+                    return response['id']
                 else:
                     raise UploadError(f'The upload failed with an unexpected response: {response}')
         except HttpError as e:
@@ -234,6 +270,7 @@ def parse_args() -> argparse.Namespace:
     VALID_PRIVACY_STATUSES = ('public', 'private', 'unlisted')
 
     argparser.add_argument('--upload', action='store_true', help='Do YouTube upload step')
+    argparser.add_argument('--add-to-playlist', action='store_true', help='Add the uploaded video to a matching playlist')
     argparser.add_argument('--move-finished-to-archive', action='store_true', help='Move finished uploads to archive directory')
     argparser.add_argument('--clean-archive', action='store_true', help='Clean old videos from archive directory')
     argparser.add_argument('--privacy-status', choices=VALID_PRIVACY_STATUSES, default='private', help='Video privacy status')
@@ -339,9 +376,10 @@ def main() -> None:
 
     # Set up OAuth
     log.info('Establishing API credentials')
+    YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube'
     YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
-    youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', YOUTUBE_UPLOAD_SCOPE, args)
-    twitch_credentials = get_oauth_credentials('twitch', 'client_secrets_twitch.json', '', args)
+    youtube_credentials = get_oauth_credentials('youtube', 'client_secrets_youtube.json', [YOUTUBE_SCOPE, YOUTUBE_UPLOAD_SCOPE], args)
+    twitch_credentials = get_oauth_credentials('twitch', 'client_secrets_twitch.json', [''], args)
     # The YouTube API client handles refreshing tokens automatically, but for Twitch I have to handle it myself
     log.info('Refreshing Twitch token')
     twitch_credentials.refresh(httplib2.Http())
@@ -359,7 +397,7 @@ def main() -> None:
                 log.info(f'Uploading "{title}" ({filename}) to be published at {publish_at}')
             else:
                 log.info(f'Uploading "{title}" ({filename})')
-            upload_video_to_youtube(
+            video_id = upload_video_to_youtube(
                 youtube,
                 filename,
                 title=title,
@@ -369,6 +407,9 @@ def main() -> None:
                 publish_at=publish_at,
                 tags=['game engine', 'game development', 'indie', 'programming', 'coding', 'stream'],
             )
+
+            if args.add_to_playlist:
+                add_video_to_matching_playlist(youtube, title, video_id)
 
             # Move uploaded file to archive
             if args.move_finished_to_archive:
