@@ -145,9 +145,9 @@ def upload_video_to_youtube(
         description: str,
         category: str,
         privacy: str,
+        publish_at: Optional[datetime.datetime] = None,
         tags: Optional[Collection[str]] = None,
 ) -> None:
-    # TODO: schedule release for 24h after stream end
     body = {
         'snippet': {
             'title': title,
@@ -159,6 +159,8 @@ def upload_video_to_youtube(
             'privacyStatus': privacy,
         },
     }
+    if publish_at is not None:
+        body['status']['publishAt'] = publish_at.isoformat()
 
     # Call the API's videos.insert method to create and upload the video.
     insert_request = youtube.videos().insert(
@@ -235,7 +237,12 @@ def parse_args() -> argparse.Namespace:
     argparser.add_argument('--move-finished-to-archive', action='store_true', help='Move finished uploads to archive directory')
     argparser.add_argument('--clean-archive', action='store_true', help='Clean old videos from archive directory')
     argparser.add_argument('--privacy-status', choices=VALID_PRIVACY_STATUSES, default='private', help='Video privacy status')
+    argparser.add_argument('--schedule', action='store_true',
+                           help='Schedule for future time instead of publishing immediately. Implies --privacy-status=private')
     args = argparser.parse_args()
+
+    if args.schedule:
+        args.privacy_status = 'private'  # Required when using status.publishAt
 
     return args
 
@@ -243,6 +250,8 @@ def parse_args() -> argparse.Namespace:
 class VodMetadata(NamedTuple):
     title: str
     description: str
+    start_ts: datetime.datetime
+    end_ts: datetime.datetime
 
 
 def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Dict[str, VodMetadata]:
@@ -274,11 +283,8 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
         if FILENAME_REGEX.match(f):
             log.info(f'Trying to find Twitch metadata for "{f}"...')
             for video in videos:
-                # There are some cases where the Twitch "created_at" timestamp comes *after* the local file creation timestamp,
-                # even if the local recording is started shortly after going live. Add a bit of a buffer to account for this.
                 GRACE_PERIOD = datetime.timedelta(seconds=30)
                 start_ts = dateutil.parser.isoparse(video['created_at'])
-                start_ts = start_ts - GRACE_PERIOD
                 match = DURATION_REGEX.match(video['duration'])
                 assert match
                 duration = datetime.timedelta(hours=int(match[2] or 0), minutes=int(match[4] or 0), seconds=int(match[6] or 0))
@@ -290,12 +296,15 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
                 else:
                     vod_creation_ts = vod_creation_ts.replace(tzinfo=dateutil.tz.tzlocal())
 
+                # There are some cases where the Twitch "created_at" timestamp comes *after* the local file creation timestamp,
+                # even if the local recording is started shortly after going live. Add a bit of a buffer to account for this.
+                adjusted_start_ts = start_ts - GRACE_PERIOD
                 # Make sure we don't try to upload in-progress VODs
                 OLDNESS_THRESHOLD = datetime.timedelta(minutes=5)
-                if start_ts <= vod_creation_ts <= end_ts:
+                if adjusted_start_ts <= vod_creation_ts <= end_ts:
                     if end_ts <= datetime.datetime.now(datetime.timezone.utc) - OLDNESS_THRESHOLD:
                         log.info(f'Found matching video for {f}: {video}')
-                        result[os.path.join(recordings_dir, f)] = VodMetadata(video['title'], video['description'])
+                        result[os.path.join(recordings_dir, f)] = VodMetadata(video['title'], video['description'], start_ts, end_ts)
                     else:
                         log.info(f'Skipping in-progress VOD: {f}')
                     break
@@ -343,8 +352,13 @@ def main() -> None:
     if args.upload:
         # Do the upload
         youtube = get_authenticated_service('youtube', 'v3', youtube_credentials)
-        for filename, (title, description) in metadata.items():
-            log.info(f'Uploading "{title}" ({filename})')
+        for filename, (title, description, start_ts, end_ts) in metadata.items():
+            publish_at = None
+            if args.schedule:
+                publish_at = end_ts + datetime.timedelta(days=1)  # 24 hours after stream end per Twitch affiliate/parter TOS
+                log.info(f'Uploading "{title}" ({filename}) to be published at {publish_at}')
+            else:
+                log.info(f'Uploading "{title}" ({filename})')
             upload_video_to_youtube(
                 youtube,
                 filename,
@@ -352,6 +366,7 @@ def main() -> None:
                 description=description,
                 category='28',  # "Science & Technology"
                 privacy=args.privacy_status,
+                publish_at=publish_at,
                 tags=['game engine', 'game development', 'indie', 'programming', 'coding', 'stream'],
             )
 
