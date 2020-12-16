@@ -278,7 +278,7 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
     FILENAME_REGEX = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}.mp4$')
     DURATION_REGEX = re.compile(r'^((\d+)h)?((\d+)m)?((\d+)s)?$')
     result: Dict[str, VodMetadata] = {}
-    for f in os.listdir(recordings_dir):
+    for f in sorted(os.listdir(recordings_dir)):
         log.debug(f'Checking filename: {f}')
         if FILENAME_REGEX.match(f):
             log.info(f'Trying to find Twitch metadata for "{f}"...')
