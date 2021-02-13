@@ -8,13 +8,16 @@ import http.client
 import httplib2
 import logging
 import os
+import pathlib
 import platform
 import random
 import re
 import requests
 import shutil
 import smtplib
+import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import traceback
@@ -110,6 +113,7 @@ def parse_args() -> argparse.Namespace:
     argparser.add_argument('--upload', action='store_true', help='Do YouTube upload step')
     argparser.add_argument('--add-to-playlist', action='store_true', help='Add the uploaded video to a matching playlist')
     argparser.add_argument('--move-finished-to-archive', action='store_true', help='Move finished uploads to archive directory')
+    argparser.add_argument('--concat-consecutive-videos', action='store_true', help='Combine successive clips before uploading')
     argparser.add_argument('--clean-archive', action='store_true', help='Clean old videos from archive directory')
     argparser.add_argument('--privacy-status', choices=VALID_PRIVACY_STATUSES, default='private', help='Video privacy status')
     argparser.add_argument('--schedule', action='store_true',
@@ -139,6 +143,20 @@ def main() -> None:
 
     # Find titles and descriptions for videos that are staged for uploading
     metadata = find_vod_metadata(RECORDINGS_DIR, twitch_credentials)
+
+    if args.concat_consecutive_videos:
+        to_concat = find_consecutive_videos(metadata)
+        for filenames in to_concat:
+            output_filename = concat_consecutive_videos(filenames)
+            metadata = update_metadata_for_concat(metadata, filenames, output_filename)
+
+            # Move original uncombined videos to archive
+            for old_filename in filenames:
+                if args.move_finished_to_archive:
+                    log.info(f'Moving {old_filename} to {ARCHIVE_DIR}')
+                    shutil.move(old_filename, ARCHIVE_DIR)
+                else:
+                    log.info(f'Would have moved {old_filename} to {ARCHIVE_DIR}')
 
     if args.upload:
         # Do the upload
@@ -272,6 +290,67 @@ def find_vod_metadata(recordings_dir: str, credentials: OAuth2Credentials) -> Di
                     break
 
     return result
+
+
+def find_consecutive_videos(metadata: Dict[str, VodMetadata]) -> List[List[str]]:
+    CLOSENESS_THRESHOLD = datetime.timedelta(minutes=30)
+    last_end_ts = datetime.datetime.min
+    if platform.system() == 'Windows':
+        last_end_ts = last_end_ts.replace(tzinfo=dateutil.tz.tzwinlocal())
+    else:
+        last_end_ts = last_end_ts.replace(tzinfo=dateutil.tz.tzlocal())
+    results: List[List[str]] = []
+    current = None
+    for filename, vod in sorted(metadata.items()):
+        if last_end_ts + CLOSENESS_THRESHOLD >= vod.start_ts:
+            # Videos are close enough
+            current.append(filename)
+        else:
+            # Start of a new stream, reset
+            if current is not None:
+                results.append(current)
+            current = [filename]
+        last_end_ts = vod.end_ts
+    results.append(current)
+    results = [result for result in results if len(result) >= 2]
+
+    return results
+
+
+def concat_consecutive_videos(filenames: List[str]) -> str:
+    assert len(filenames) >= 2
+    input_file = pathlib.Path(filenames[0])
+    output_name = str(input_file.with_stem(f'{input_file.stem}_combined'))
+    list_file = tempfile.NamedTemporaryFile('w+', delete=False)
+    try:
+        log.info(f'Combining files: {filenames}')
+        list_file.writelines(f"file '{f}'\n" for f in filenames)
+        cmd = rf"""ffmpeg -f concat -safe 0 -n -i {list_file.name} -c copy {output_name}"""
+        log.info(f'Running command: {cmd}')
+        list_file.close()  # The Windows filesystem is dumb
+        proc = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        log.info(f'Stdout: {proc.stdout}')
+        log.warning(f'Stderr: {proc.stderr}')
+    finally:
+        os.remove(list_file.name)
+
+    return output_name
+
+
+def update_metadata_for_concat(old_metadata: Dict[str, VodMetadata], old_filenames: List[str], new_filename: str) -> Dict[str, VodMetadata]:
+    assert len(old_filenames) >= 2
+    first_video = old_metadata[old_filenames[0]]
+    last_video = old_metadata[old_filenames[-1]]
+
+    new_metadata = {filename: metadata for filename, metadata in old_metadata.items() if filename not in old_filenames}
+    new_metadata[new_filename] = VodMetadata(
+        title=first_video.title,
+        description=first_video.description,
+        start_ts=first_video.start_ts,
+        end_ts=last_video.end_ts,
+    )
+
+    return new_metadata
 
 
 def get_authenticated_service(
