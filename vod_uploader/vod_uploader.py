@@ -311,7 +311,8 @@ def find_consecutive_videos(metadata: Dict[str, VodMetadata]) -> List[List[str]]
                 results.append(current)
             current = [filename]
         last_end_ts = vod.end_ts
-    results.append(current)
+    if current is not None:
+        results.append(current)
     results = [result for result in results if len(result) >= 2]
 
     return results
